@@ -45,6 +45,7 @@ export interface PlaceDTO {
   name: string;
   description?: string;
   category: string;
+  photoUrl?: string;
   address?: string;
   latitude?: number;
   longitude?: number;
@@ -60,6 +61,7 @@ export interface CreatePlaceRequest {
   name: string;
   description?: string;
   category: string;
+  status?: 'PENDING' | 'ACCEPTED' | 'REJECTED'; // Opcional, default PENDING
   address?: string;
   latitude?: number;
   longitude?: number;
@@ -131,4 +133,27 @@ export interface RequestActionResponse {
   reason?: string;
   reviewedBy: string;
   reviewedAt: string;
+}
+
+// ========== Solicitudes (Microservicio Flask) ==========
+// Representa la entidad que vive en la tabla 'solicitudes'
+export interface SolicitudDTO {
+  id: number;
+  nombre: string;
+  categoria: string;
+  ubicacion: string;
+  estado: 'pendiente' | 'aceptada' | 'rechazada';
+  user_email?: string;
+  latitude?: number;
+  longitude?: number;
+}
+
+export interface CreateSolicitudRequest {
+  nombre: string;
+  categoria: string;
+  ubicacion: string;
+  user_email?: string;
+  latitude?: number;
+  longitude?: number;
+  photo_url?: string;
 }

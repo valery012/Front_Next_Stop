@@ -17,7 +17,6 @@ export const ProfilePage: React.FC = () => {
     <div className="min-h-screen bg-gray-50 py-12">
       <div className="max-w-4xl mx-auto px-4">
         <div className="bg-white rounded-lg shadow-lg p-8">
-          {/* Header */}
           <div className="flex justify-between items-center mb-8">
             <h1 className="text-3xl font-bold text-gray-800">Mi Perfil</h1>
             <button
@@ -27,8 +26,6 @@ export const ProfilePage: React.FC = () => {
               {isEditing ? 'Guardar' : 'Editar'}
             </button>
           </div>
-
-          {/* Profile Card */}
           <div className="flex gap-8 items-start">
             <div>
               <img
@@ -37,7 +34,6 @@ export const ProfilePage: React.FC = () => {
                 className="w-32 h-32 rounded-full object-cover border-4 border-blue-600"
               />
             </div>
-
             <div className="flex-1">
               <div className="space-y-4">
                 <div>
@@ -55,8 +51,6 @@ export const ProfilePage: React.FC = () => {
               </div>
             </div>
           </div>
-
-          {/* Stats */}
           <div className="mt-8 grid grid-cols-3 gap-4">
             <div className="bg-blue-50 p-4 rounded-lg text-center">
               <p className="text-gray-600 text-sm font-semibold">LUGARES CREADOS</p>
@@ -76,3 +70,5 @@ export const ProfilePage: React.FC = () => {
     </div>
   );
 };
+
+export default ProfilePage;

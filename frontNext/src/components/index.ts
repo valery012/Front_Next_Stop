@@ -13,6 +13,12 @@ export { MapView } from './Places/MapView';
 // Notification Components
 export { ToastNotification } from './Notifications/ToastNotification';
 export { NotificationCenter } from './Notifications/NotificationCenter';
+export { NotificationBell } from './Notifications/NotificationBell';
+export { NotificationsPanel } from './Notifications/NotificationsPanel';
+
+// Agent
+export { AgentWidget } from './Agent/AgentWidget';
+export { AgentChat } from './Agent/AgentChat';
 
 // Page Components
 export { RootPage } from './RootPage';
@@ -21,3 +27,4 @@ export { LoginPage } from './Pages/LoginPage';
 export { HomePage } from './Pages/HomePage';
 export { ProfilePage } from './Pages/ProfilePage';
 export { ModeratorDashboard } from './Pages/ModeratorDashboard';
+export { AgentPage } from './Pages/AgentPage';

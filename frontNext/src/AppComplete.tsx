@@ -104,11 +104,11 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
   const [name, setName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
 
-    setTimeout(() => {
+    setTimeout(async () => {
       if (isLogin) {
         const savedUsers = localStorage.getItem('users');
         const users = savedUsers ? JSON.parse(savedUsers) : [];
@@ -116,19 +116,60 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLogin }) => {
         if (user) onLogin(user);
         else alert('Credenciales inválidas');
       } else {
-        const newUser: User = {
-          id: Math.random().toString(36).substr(2, 9),
-          email,
-          password,
-          name,
-          role: 'user',
-          createdAt: new Date(),
-        };
-        const savedUsers = localStorage.getItem('users');
-        const users = savedUsers ? JSON.parse(savedUsers) : [];
-        users.push(newUser);
-        localStorage.setItem('users', JSON.stringify(users));
-        onLogin(newUser);
+        // Registro de nuevo usuario
+        try {
+          // Intentar registrar en el microservicio primero
+          const response = await fetch('http://localhost:8083/api/users', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: JSON.stringify({
+              name: name,
+              Email: email,
+              gender: 'no especificado',
+            }),
+          });
+
+          if (response.ok) {
+            const createdUser = await response.json();
+            console.log('✅ Usuario creado en microservicio:', createdUser);
+            
+            const newUser: User = {
+              id: createdUser.id,
+              email: createdUser.email,
+              password,
+              name: createdUser.name,
+              role: 'user',
+              createdAt: new Date(createdUser.createdAt || Date.now()),
+            };
+
+            const savedUsers = localStorage.getItem('users');
+            const users = savedUsers ? JSON.parse(savedUsers) : [];
+            users.push(newUser);
+            localStorage.setItem('users', JSON.stringify(users));
+            onLogin(newUser);
+          } else {
+            throw new Error('Error al crear usuario en el servidor');
+          }
+        } catch (error) {
+          console.warn('⚠️ Microservicio no disponible, usando solo localStorage:', error);
+          
+          // Fallback: guardar solo en localStorage
+          const newUser: User = {
+            id: Math.random().toString(36).substr(2, 9),
+            email,
+            password,
+            name,
+            role: 'user',
+            createdAt: new Date(),
+          };
+          const savedUsers = localStorage.getItem('users');
+          const users = savedUsers ? JSON.parse(savedUsers) : [];
+          users.push(newUser);
+          localStorage.setItem('users', JSON.stringify(users));
+          onLogin(newUser);
+        }
       }
       setIsLoading(false);
     }, 600);

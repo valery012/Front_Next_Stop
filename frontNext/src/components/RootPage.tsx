@@ -3,16 +3,17 @@ import { Navigation } from './UI/Navigation';
 import { HomePage } from './Pages/HomePage';
 import { LandingPage } from './Pages/LandingPage';
 import { LoginPage } from './Pages/LoginPage';
+import { AgentPage } from './Pages/AgentPage';
 import { ProfilePage } from './Pages/ProfilePage';
 import { ModeratorDashboard } from './Pages/ModeratorDashboard';
 import { useNotificationManager } from '../hooks/useNotificationManager';
 import { ToastNotification } from './Notifications/ToastNotification';
 import type { User } from '../types';
 
-type PageType = 'landing' | 'login' | 'home' | 'profile' | 'moderator';
+type PageType = 'landing' | 'login' | 'home' | 'profile' | 'moderator' | 'agent';
 
 export const RootPage: React.FC = () => {
-  const [currentPage] = useState<PageType>('landing');
+  const [currentPage, setCurrentPage] = useState<PageType>('landing');
   const [isAuthenticated] = useState(false);
   const [currentUser] = useState<User | null>(null);
   const { notifications, removeNotification } = useNotificationManager();
@@ -27,6 +28,8 @@ export const RootPage: React.FC = () => {
         return isAuthenticated ? <HomePage /> : <LoginPage />;
       case 'profile':
         return isAuthenticated ? <ProfilePage /> : <LoginPage />;
+      case 'agent':
+        return isAuthenticated ? <AgentPage /> : <LoginPage />;
       case 'moderator':
         return isAuthenticated && currentUser?.role === 'moderator' ? (
           <ModeratorDashboard />
@@ -40,7 +43,7 @@ export const RootPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {isAuthenticated && <Navigation />}
+      {isAuthenticated && <Navigation onOpenAgent={() => setCurrentPage('agent')} />}
 
       {/* Toast Notifications */}
       <div className="fixed top-4 right-4 z-50 space-y-3">

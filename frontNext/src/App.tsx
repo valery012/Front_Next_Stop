@@ -1,8 +1,70 @@
 import React, { useState, useEffect } from 'react';
+import { AgentChat } from './components/Agent/AgentChat';
+import { CreatePlaceForm } from './components/Places/CreatePlaceForm';
+import { PlaceDetailsModal } from './components/Places/PlaceDetailsModal';
+import { NotificationBell } from './components/Notifications/NotificationBell';
+import { NotificationsPanel } from './components/Notifications/NotificationsPanel';
 import type { User, Place } from './types';
+import { apiGetSolicitudesPendientes, apiGetSolicitudesAceptadas } from './services/api';
 import './App.css';
 
 type PageType = 'landing' | 'login' | 'home' | 'profile' | 'moderator' | 'admin';
+
+// Normaliza estados del backend (PENDIENTE/ACEPTADO/RECHAZADO) a valores usados en UI
+function mapStatus(s?: string | null): 'pending' | 'approved' | 'rejected' {
+  const u = (s || '').toString().toUpperCase();
+  if (u === 'PENDIENTE' || u === 'PENDING' || u === '') return 'pending';
+  if (u === 'ACEPTADO' || u === 'ACCEPTED' || u === 'APPROVED') return 'approved';
+  if (u === 'RECHAZADO' || u === 'REJECTED') return 'rejected';
+  try {
+    // fallback: si viene en minúsculas u otro formato
+    return (s as any)?.toLowerCase?.() ?? 'pending';
+  } catch {
+    return 'pending';
+  }
+}
+
+// Extrae categoría desde descripciones antiguas tipo: "Categoría: X - Ubicación: ..."
+function deriveCategoryFromDescription(desc?: string | null): string | null {
+  if (!desc) return null;
+  const match = desc.match(/categor[ií]a\s*:\s*([^\-\n\r]+)/i);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return null;
+}
+
+// Normaliza categorías a las usadas por la app
+function normalizeCategory(raw?: string | null): string | null {
+  if (!raw) return null;
+  const s = raw
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, ''); // quitar acentos
+
+  const map: Record<string, string> = {
+    restaurante: 'restaurant',
+    restaurantes: 'restaurant',
+    restaurant: 'restaurant',
+    comida: 'restaurant',
+    hotel: 'hotel',
+    hoteles: 'hotel',
+    natural: 'natural',
+    naturaleza: 'natural',
+    parque: 'natural',
+    parques: 'natural',
+    viewpoint: 'viewpoint',
+    mirador: 'viewpoint',
+    miradores: 'viewpoint',
+    // compat historica
+    museum: 'viewpoint', // si existiera, puedes cambiar a 'museum' si deseas chip propio
+    museo: 'viewpoint',
+    museos: 'viewpoint',
+  };
+  return map[s] || s;
+}
 
 // Landing Page Component
 function LandingPage({ onNavigate }: { onNavigate: (page: 'login') => void }) {
@@ -134,11 +196,11 @@ function LoginPage({ onLogin, onBack }: { onLogin: (user: User) => void; onBack:
   const [name, setName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
 
-    setTimeout(() => {
+    setTimeout(async () => {
       if (isLogin) {
         const savedUsers = localStorage.getItem('users');
         const users = savedUsers ? JSON.parse(savedUsers) : [];
@@ -149,19 +211,60 @@ function LoginPage({ onLogin, onBack }: { onLogin: (user: User) => void; onBack:
           alert('Credenciales inválidas');
         }
       } else {
-        const newUser: User = {
-          id: Math.random().toString(36).substr(2, 9),
-          email,
-          password,
-          name,
-          role: 'user',
-          createdAt: new Date(),
-        };
-        const savedUsers = localStorage.getItem('users');
-        const users = savedUsers ? JSON.parse(savedUsers) : [];
-        users.push(newUser);
-        localStorage.setItem('users', JSON.stringify(users));
-        onLogin(newUser);
+        // Registro de nuevo usuario
+        try {
+          // Intentar registrar en el microservicio primero
+          const response = await fetch('http://localhost:8083/api/users', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: JSON.stringify({
+              name: name,
+              Email: email,
+              gender: 'no especificado',
+            }),
+          });
+
+          if (response.ok) {
+            const createdUser = await response.json();
+            console.log('✅ Usuario creado en microservicio:', createdUser);
+            
+            const newUser: User = {
+              id: createdUser.id,
+              email: createdUser.email,
+              password,
+              name: createdUser.name,
+              role: 'user',
+              createdAt: new Date(createdUser.createdAt || Date.now()),
+            };
+
+            const savedUsers = localStorage.getItem('users');
+            const users = savedUsers ? JSON.parse(savedUsers) : [];
+            users.push(newUser);
+            localStorage.setItem('users', JSON.stringify(users));
+            onLogin(newUser);
+          } else {
+            throw new Error('Error al crear usuario en el servidor');
+          }
+        } catch (error) {
+          console.warn('⚠️ Microservicio no disponible, usando solo localStorage:', error);
+          
+          // Fallback: guardar solo en localStorage
+          const newUser: User = {
+            id: Math.random().toString(36).substr(2, 9),
+            email,
+            password,
+            name,
+            role: 'user',
+            createdAt: new Date(),
+          };
+          const savedUsers = localStorage.getItem('users');
+          const users = savedUsers ? JSON.parse(savedUsers) : [];
+          users.push(newUser);
+          localStorage.setItem('users', JSON.stringify(users));
+          onLogin(newUser);
+        }
       }
       setIsLoading(false);
     }, 600);
@@ -265,59 +368,133 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
   const approvedPlaces = places.filter((p: Place) => p.status === 'approved');
   const filteredPlaces = selectedCategory ? approvedPlaces.filter((p: Place) => p.category === selectedCategory) : approvedPlaces;
 
+  // Estado de notificaciones
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  // Polling de notificaciones
+  React.useEffect(() => {
+    if (!user?.email) return;
+    let disposed = false;
+
+    const loadNotifications = async () => {
+      try {
+        const { getNotificationsByUser } = await import('./services/notificationsService');
+        const notifs = await getNotificationsByUser(user.email);
+        if (disposed) return;
+        setNotifications(notifs);
+        setUnreadCount(notifs.filter((n: any) => n.estado === 'pendiente').length);
+      } catch (error) {
+        console.error('Error cargando notificaciones:', error);
+      }
+    };
+
+    // Cargar inmediatamente
+    loadNotifications();
+
+    // Polling cada 30 segundos
+    const intervalId = setInterval(loadNotifications, 30000);
+
+    // Recargar al hacer foco en la ventana
+    const handleFocus = () => loadNotifications();
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      disposed = true;
+      clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [user?.email]);
+
+  const handleMarkAsRead = async (notificationId: number) => {
+    try {
+      const { markNotificationAsRead, getNotificationsByUser } = await import('./services/notificationsService');
+      await markNotificationAsRead(notificationId);
+      const updated = await getNotificationsByUser(user.email);
+      setNotifications(updated);
+      setUnreadCount(updated.filter((n: any) => n.estado === 'pendiente').length);
+    } catch (error) {
+      console.error('Error marcando notificación:', error);
+    }
+  };
+
+  const handleDeleteNotification = async (notificationId: number) => {
+    try {
+      const { deleteNotification, getNotificationsByUser } = await import('./services/notificationsService');
+      await deleteNotification(notificationId);
+      const updated = await getNotificationsByUser(user.email);
+      setNotifications(updated);
+      setUnreadCount(updated.filter((n: any) => n.estado === 'pendiente').length);
+    } catch (error) {
+      console.error('Error eliminando notificación:', error);
+    }
+  };
+
+  // Mapeo de etiquetas amigables por categoría conocida
+  const categoryLabels: Record<string, string> = {
+    restaurant: 'Restaurantes',
+    hotel: 'Hoteles',
+    natural: 'Naturales',
+    viewpoint: 'Miradores',
+  };
+
+  // Lista base de categorías soportadas por la app
+  const defaultCategories = ['restaurant', 'hotel', 'natural', 'viewpoint'];
+
+  // Categorías disponibles: unión de dinámicas (datos) + base, sin duplicados
+  const dynamicCats = approvedPlaces
+    .map((p: Place) => (p.category || '').toString().trim().toLowerCase())
+    .filter(Boolean);
+  const availableCategories = Array.from(new Set([...defaultCategories, ...dynamicCats]))
+    .map((value) => ({ value, label: categoryLabels[value] || (value.charAt(0).toUpperCase() + value.slice(1)) }));
+
+  // Si la categoría seleccionada ya no existe en los datos, resetear a "Todos"
+  React.useEffect(() => {
+    if (selectedCategory && !availableCategories.some(c => c.value === selectedCategory)) {
+      setSelectedCategory(null);
+    }
+  }, [approvedPlaces.length]);
+
   const firstName = (user?.name || '').trim().split(' ')[0] || user?.name || 'Usuario';
   const initial = firstName?.charAt(0)?.toUpperCase() || 'U';
 
   // Crear lugar modal state
   const [showCreate, setShowCreate] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newDescription, setNewDescription] = useState('');
-  const [newCategory, setNewCategory] = useState('restaurant');
-  const [photoInputs, setPhotoInputs] = useState<string[]>(['']);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
 
-  const defaultPhoto = 'https://images.unsplash.com/photo-1528909514045-2fa4ac7a08ba?w=800&auto=format&fit=crop&q=60';
-
-  const handleAddPhotoField = () => {
-    setPhotoInputs((prev) => [...prev, '']);
-  };
-
-  const handlePhotoChange = (index: number, value: string) => {
-    setPhotoInputs((prev) => prev.map((p, i) => (i === index ? value : p)));
-  };
-
-  const handleCreateSubmit = () => {
-    if (!newName.trim() || !newDescription.trim()) return;
+  const handleCreateSubmit = async (data: { name: string; description: string; category: string; latitude: number; longitude: number; imageUrl?: string }) => {
     setIsSubmitting(true);
-    // Preparar fotos (filtrar vacíos, fallback por defecto)
-    const cleanedPhotos = photoInputs.map(p => p.trim()).filter(p => p.length > 0);
-    const photos = cleanedPhotos.length > 0 ? cleanedPhotos : [defaultPhoto];
-    const newPlace: Place = {
-      id: Math.random().toString(36).slice(2),
-      name: newName.trim(),
-      description: newDescription.trim(),
-      category: newCategory,
-      latitude: 0,
-      longitude: 0,
-      photos,
-      createdBy: user.id,
-      creatorName: user.name,
-      createdAt: new Date(),
-      status: 'pending', // Se enviará a moderación
-    } as Place;
-    // Guardar usando callback para actualizar estado global
-    onAddPlace(newPlace);
-    // Forzar recarga de lugares aprobados si ya estaba abierto
-    // No tenemos un callback directo aquí; recargaremos la ventana de forma suave
-    setShowCreate(false);
-    setIsSubmitting(false);
-    setNewName('');
-    setNewDescription('');
-    setNewCategory('restaurant');
-    setPhotoInputs(['']);
-    setToast({ type: 'success', message: 'Lugar creado y enviado a moderación' });
-    setTimeout(() => setToast(null), 4000);
+    
+    try {
+      // Importar dinámicamente el servicio API de solicitudes
+      const { apiCreateSolicitud } = await import('./services/api');
+
+      await apiCreateSolicitud({
+        nombre: data.name,
+        categoria: data.category,
+        ubicacion: data.description,
+        user_email: user.email,
+        latitude: data.latitude,
+        longitude: data.longitude,
+        photo_url: data.imageUrl || undefined,
+      });
+
+      setShowCreate(false);
+      setToast({ type: 'success', message: '✓ Solicitud enviada para revisión por el administrador' });
+      setTimeout(() => setToast(null), 4000);
+    } catch (error: any) {
+      console.error('Error creando solicitud:', error);
+      setToast({ 
+        type: 'error', 
+        message: `Error al enviar solicitud: ${error.message || 'Intenta nuevamente'}` 
+      });
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -339,6 +516,10 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
                 <span className="block text-[11px] text-gray-500">Mi perfil</span>
               </span>
             </button>
+
+            {/* Notificaciones */}
+            <NotificationBell unreadCount={unreadCount} onClick={() => setShowNotifications(true)} />
+
             {user.role === 'moderator' && (
               <button onClick={() => onNavigate('moderator')} className="bg-yellow-100 text-yellow-800 px-4 py-2 rounded-lg font-semibold">
                 Panel Moderador
@@ -385,9 +566,9 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
         </div>
 
         {showCreate && (
-          <div className="fixed inset-0 z-50 flex items-start justify-center pt-20">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => !isSubmitting && setShowCreate(false)} />
-            <div className="relative w-full max-w-lg bg-white rounded-xl shadow-xl border border-gray-200 p-6">
+            <div className="relative w-full max-w-2xl bg-white rounded-xl shadow-xl border border-gray-200 p-6 max-h-[90vh] overflow-y-auto">
               <div className="flex items-start justify-between mb-4">
                 <h3 className="text-xl font-bold text-gray-900">Nuevo Lugar</h3>
                 <button
@@ -398,112 +579,18 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
                 </button>
               </div>
-              <div className="space-y-5 max-h-[70vh] overflow-y-auto pr-2">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Nombre</label>
-                  <input
-                    type="text"
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    placeholder="Ej: Mirador Secreto"
-                    className="w-full px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Descripción</label>
-                  <textarea
-                    value={newDescription}
-                    onChange={(e) => setNewDescription(e.target.value)}
-                    placeholder="Describe el lugar, acceso, ambiente..."
-                    rows={4}
-                    className="w-full px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Categoría</label>
-                  <select
-                    value={newCategory}
-                    onChange={(e) => setNewCategory(e.target.value)}
-                    className="w-full px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  >
-                    <option value="restaurant">Restaurante</option>
-                    <option value="hotel">Hotel</option>
-                    <option value="natural">Natural</option>
-                    <option value="viewpoint">Mirador</option>
-                    <option value="museum">Museo</option>
-                    <option value="park">Parque</option>
-                    <option value="other">Otro</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Fotos (URLs) - opcional</label>
-                  <div className="space-y-3">
-                    {photoInputs.map((val, idx) => (
-                      <div key={idx} className="space-y-1">
-                        <input
-                          type="text"
-                          value={val}
-                          onChange={(e) => handlePhotoChange(idx, e.target.value)}
-                          placeholder={idx === 0 ? 'https://...' : 'Otra foto...'}
-                          className="w-full px-3 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-1 focus:ring-purple-400"
-                        />
-                        {val.trim().startsWith('http') && (
-                          <div className="rounded-md border border-gray-200 overflow-hidden">
-                            <img
-                              src={val}
-                              alt={`preview-${idx}`}
-                              className="h-32 w-full object-cover"
-                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                            />
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={handleAddPhotoField}
-                      className="text-sm inline-flex items-center gap-1 text-purple-600 hover:text-purple-700"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14"/></svg>
-                      Añadir otra
-                    </button>
-                    <p className="text-xs text-gray-500">Si no añades ninguna, se usará una imagen por defecto.</p>
-                  </div>
-                </div>
-                <div className="pt-2 flex gap-3">
-                  <button
-                    disabled={isSubmitting || !newName.trim() || !newDescription.trim()}
-                    onClick={handleCreateSubmit}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold disabled:opacity-50"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>
-                        Guardando...
-                      </>
-                    ) : (
-                      <>
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 5v14M5 12h14"/></svg>
-                        Enviar a moderación
-                      </>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSubmitting}
-                    onClick={() => setShowCreate(false)}
-                    className="px-5 py-2.5 rounded-md border border-gray-300 text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </div>
+              <CreatePlaceForm onSubmit={handleCreateSubmit} />
             </div>
           </div>
         )}
         {toast && (
           <div className="fixed bottom-5 right-5 z-50">
-            <div className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border text-sm font-medium ${toast.type === 'success' ? 'bg-green-50 border-green-300 text-green-700' : 'bg-red-50 border-red-300 text-red-700'}`}>\n+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">${'success' === 'success' ? '' : ''}<path d="M12 22c5.522 0 10-4.477 10-10S17.522 2 12 2 2 6.477 2 12s4.478 10 10 10Z"/><path d="M16 12h-4"/><path d="M12 8h.01"/></svg>
+            <div className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border text-sm font-medium ${toast.type === 'success' ? 'bg-green-50 border-green-300 text-green-700' : 'bg-red-50 border-red-300 text-red-700'}`}> 
+              {toast.type === 'success' ? (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 13l4 4L19 7"/></svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+              )}
               <span>{toast.message}</span>
               <button onClick={() => setToast(null)} className="ml-2 text-xs uppercase tracking-wide opacity-70 hover:opacity-100">Cerrar</button>
             </div>
@@ -517,13 +604,14 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
           >
             Todos
           </button>
-          {['restaurant', 'hotel', 'natural', 'viewpoint'].map((cat) => (
+          {availableCategories.map((cat) => (
             <button
-              key={cat}
-              onClick={() => setSelectedCategory(cat)}
-              className={`px-4 py-2 rounded-full font-semibold transition ${selectedCategory === cat ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+              key={cat.value}
+              onClick={() => setSelectedCategory(cat.value)}
+              className={`px-4 py-2 rounded-full font-semibold transition ${selectedCategory === cat.value ? 'bg-purple-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}
+              title={`Filtrar por ${cat.label}`}
             >
-              {cat === 'restaurant' ? 'Restaurantes' : cat === 'hotel' ? 'Hoteles' : cat === 'natural' ? 'Naturales' : 'Miradores'}
+              {cat.label}
             </button>
           ))}
         </div>
@@ -531,8 +619,13 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
         {filteredPlaces.length > 0 ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filteredPlaces.map((place: Place) => (
-              <div key={place.id} className="bg-white rounded-lg shadow-md hover:shadow-lg transition-shadow overflow-hidden">
-                <img src={place.photos && place.photos[0] ? place.photos[0] : 'https://via.placeholder.com/400x250'} alt={place.name} className="w-full h-48 object-cover" />
+              <div
+                key={place.id}
+                className="bg-white rounded-lg shadow-md hover:shadow-lg transition-shadow overflow-hidden cursor-pointer"
+                onClick={() => setSelectedPlace(place)}
+                title="Ver detalles"
+              >
+                <img src={place.imageUrl || (place.photos && place.photos[0]) || 'https://via.placeholder.com/400x250'} alt={place.name} className="w-full h-48 object-cover" />
                 <div className="p-4">
                   <h3 className="text-lg font-bold text-gray-900 mb-2">{place.name}</h3>
                   <p className="text-gray-600 text-sm mb-3">{place.description.substring(0, 100)}...</p>
@@ -549,6 +642,19 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
             <p className="text-gray-500 text-lg">No hay lugares en esta categoría</p>
           </div>
         )}
+
+        {selectedPlace && (
+          <PlaceDetailsModal place={selectedPlace} onClose={() => setSelectedPlace(null)} />
+        )}
+
+        {showNotifications && (
+          <NotificationsPanel
+            notifications={notifications}
+            onMarkAsRead={handleMarkAsRead}
+            onDelete={handleDeleteNotification}
+            onClose={() => setShowNotifications(false)}
+          />
+        )}
       </main>
     </div>
   );
@@ -556,12 +662,58 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
 
 // Profile Page Component
 function ProfilePage({ user, places, onNavigate, onLogout }: any) {
-  const userPlaces = places.filter((p: Place) => p.createdBy === user.id);
-  const approvedCount = userPlaces.filter((p: Place) => p.status === 'approved').length;
-  // Faltaba esta lista y causaba error en render
-  const approvedPlaces = userPlaces.filter((p: Place) => p.status === 'approved');
-  const pendingPlaces = userPlaces.filter((p: Place) => p.status === 'pending');
-  const rejectedPlaces = userPlaces.filter((p: Place) => p.status === 'rejected');
+  const [solicitudes, setSolicitudes] = React.useState<any[]>([]);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    const loadSolicitudes = async () => {
+      try {
+        // Cargar solo las solicitudes del usuario actual
+        const response = await fetch(`http://localhost:5007/solicitudes/usuario/${user.email}`);
+        const solicitudesUsuario = await response.json();
+        setSolicitudes(solicitudesUsuario);
+      } catch (error) {
+        console.error('Error cargando solicitudes:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadSolicitudes();
+  }, [user.email]);
+
+  // Mapear solicitudes a formato de Place para reutilizar el renderizado
+  const pendingPlaces = solicitudes
+    .filter(s => s.estado === 'pendiente')
+    .map(s => ({
+      id: `sol-${s.id}`,
+      name: s.nombre,
+      description: `Categoría: ${s.categoria} - Ubicación: ${s.ubicacion}`,
+      category: s.categoria,
+      status: 'pending'
+    }));
+
+  const approvedPlaces = solicitudes
+    .filter(s => s.estado === 'aceptada')
+    .map(s => ({
+      id: `sol-${s.id}`,
+      name: s.nombre,
+      description: `Categoría: ${s.categoria} - Ubicación: ${s.ubicacion}`,
+      category: s.categoria,
+      status: 'approved'
+    }));
+
+  const rejectedPlaces = solicitudes
+    .filter(s => s.estado === 'rechazada')
+    .map(s => ({
+      id: `sol-${s.id}`,
+      name: s.nombre,
+      description: `Categoría: ${s.categoria} - Ubicación: ${s.ubicacion}`,
+      category: s.categoria,
+      status: 'rejected'
+    }));
+
+  const userPlaces = [...pendingPlaces, ...approvedPlaces, ...rejectedPlaces];
+  const approvedCount = approvedPlaces.length;
 
   const renderStatusBadge = (status: string) => {
     const base = 'inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium';
@@ -604,7 +756,7 @@ function ProfilePage({ user, places, onNavigate, onLogout }: any) {
               <div className="p-4 flex flex-col gap-2 flex-1">
                 <div className="flex items-start justify-between gap-2">
                   <h4 className="text-base font-semibold text-gray-900 leading-tight line-clamp-2">{pl.name}</h4>
-                  {renderStatusBadge(pl.status)}
+                  {pl.status && renderStatusBadge(pl.status)}
                 </div>
                 {pl.category && (
                   <span className="text-xs uppercase tracking-wide text-purple-600 font-medium">{pl.category}</span>
@@ -632,6 +784,17 @@ function ProfilePage({ user, places, onNavigate, onLogout }: any) {
       )}
     </section>
   );
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Cargando tus lugares...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -748,7 +911,7 @@ function ModeratorDashboard({ user, places, onUpdatePlace, onNavigate, onLogout 
                   <button
                     key={place.id}
                     onClick={() => setSelectedPlace(place)}
-                    className={`w-full p-4 rounded-lg border-2 text-left transition-all ${
+                    className={`w-full p-4 rounded-lg border-2 text-left transition ${
                       selectedPlace?.id === place.id ? 'border-purple-500 bg-purple-50' : 'border-gray-200 hover:border-gray-300'
                     }`}
                   >
@@ -804,63 +967,124 @@ function ModeratorDashboard({ user, places, onUpdatePlace, onNavigate, onLogout 
   );
 }
 
-// Mock Data
-const MOCK_PLACES: Place[] = [
-  {
-    id: '1',
-    name: 'Cascada Oculta del Bosque',
-    description: 'Una hermosa cascada escondida en el bosque, perfecta para escapar del turismo masivo',
-    category: 'natural',
-    latitude: 40.7128,
-    longitude: -74.006,
-    photos: ['https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400'],
-    createdBy: 'user1',
-    createdAt: new Date('2024-10-01'),
-    status: 'approved',
-    creatorName: 'Carlos M.',
-  },
-  {
-    id: '2',
-    name: 'Restaurante Pequeño',
-    description: 'Comida local auténtica en un lugar muy poco conocido',
-    category: 'restaurant',
-    latitude: 40.758,
-    longitude: -73.9855,
-    photos: ['https://images.unsplash.com/photo-1495521821757-a1efb6729352?w=400'],
-    createdBy: 'user2',
-    createdAt: new Date('2024-10-05'),
-    status: 'approved',
-    creatorName: 'María L.',
-  },
-  {
-    id: '3',
-    name: 'Mirador Secreto',
-    description: 'Vista panorámica increíble del atardecer',
-    category: 'viewpoint',
-    latitude: 40.7489,
-    longitude: -73.968,
-    photos: ['https://images.unsplash.com/photo-1469022563149-aa64dbd37dae?w=400'],
-    createdBy: 'user3',
-    createdAt: new Date('2024-10-10'),
-    status: 'pending',
-    creatorName: 'Juan P.',
-  },
-];
-
 // Admin Dashboard Component
 function AdminDashboard({ user, places, onUpdatePlace, onNavigate, onLogout }: any) {
   const [selectedPlace, setSelectedPlace] = useState<Place | null>(null);
-  const pendingPlaces = places.filter((p: Place) => p.status === 'pending');
-  const allRequests = places; // Admin ve todas las solicitudes
+  const [showAgentChat, setShowAgentChat] = useState(false);
+  const [solPend, setSolPend] = useState<any[]>([]);
+  const [solAcep, setSolAcep] = useState<any[]>([]);
+  const [solRech, setSolRech] = useState<any[]>([]);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [activeTab, setActiveTab] = useState<'solicitudes' | 'usuarios'>('solicitudes');
 
-  const handleApprove = (place: Place) => {
-    onUpdatePlace({ ...place, status: 'approved' });
-    setSelectedPlace(null);
+  const mapSolicitudToPlace = (s: any): Place => ({
+    id: String(s.id),
+    name: s.nombre,
+    description: s.ubicacion ? `Ubicación: ${s.ubicacion}` : '',
+    category: s.categoria,
+    createdBy: '',
+    creatorName: '',
+    createdAt: new Date(),
+    status: s.estado === 'pendiente' ? 'pending' : s.estado === 'aceptada' ? 'approved' : 'rejected',
+  });
+
+  const loadSolicitudes = async () => {
+    setLoading(true);
+    try {
+      const { apiGetSolicitudesPendientes, apiGetSolicitudesAceptadas, apiGetSolicitudesRechazadas } = await import('./services/api');
+      const [p, a, r] = await Promise.all([
+        apiGetSolicitudesPendientes().catch(() => []),
+        apiGetSolicitudesAceptadas().catch(() => []),
+        apiGetSolicitudesRechazadas().catch(() => []),
+      ]);
+      setSolPend(p);
+      setSolAcep(a);
+      setSolRech(r);
+    } catch (e) {
+      console.error('Error cargando solicitudes:', e);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleReject = (place: Place) => {
-    onUpdatePlace({ ...place, status: 'rejected' });
-    setSelectedPlace(null);
+  const loadUsers = async () => {
+    try {
+      // Intentar cargar desde el backend primero
+      const { apiGetAllUsers } = await import('./services/api');
+      const usersFromBackend = await apiGetAllUsers();
+      
+      // Mapear UserDTO a User si es necesario
+      const mappedUsers: User[] = usersFromBackend.map((dto: any) => ({
+        id: dto.id || dto.userId,
+        name: dto.name || dto.username || 'Sin nombre',
+        email: dto.email,
+        password: '***', // No mostrar password
+        role: dto.role || 'user',
+        createdAt: dto.createdAt ? new Date(dto.createdAt) : new Date(),
+      }));
+      
+      setAllUsers(mappedUsers);
+      console.log('✅ Usuarios cargados desde backend:', mappedUsers.length);
+    } catch (backendError) {
+      console.warn('⚠️ Backend no disponible, usando localStorage como fallback:', backendError);
+      
+      // Fallback: cargar desde localStorage
+      try {
+        const savedUsers = localStorage.getItem('users');
+        const users: User[] = savedUsers ? JSON.parse(savedUsers) : [];
+        setAllUsers(users);
+        console.log('✅ Usuarios cargados desde localStorage:', users.length);
+      } catch (localError) {
+        console.error('❌ Error cargando usuarios desde localStorage:', localError);
+        setAllUsers([]);
+      }
+    }
+  };
+
+  useEffect(() => {
+    loadSolicitudes();
+    loadUsers();
+    const id = window.setInterval(() => {
+      loadSolicitudes();
+      loadUsers();
+    }, 10000);
+    const onFocus = () => {
+      loadSolicitudes();
+      loadUsers();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, []);
+
+  const pendingPlaces = solPend.map(mapSolicitudToPlace);
+  const allRequests = [...solPend, ...solAcep, ...solRech].map(mapSolicitudToPlace);
+
+  const handleApprove = async (place: Place) => {
+    try {
+      const { apiAprobarSolicitud } = await import('./services/api');
+      await apiAprobarSolicitud(parseInt(String(place.id), 10));
+      await loadSolicitudes();
+    } catch (e) {
+      console.warn('Fallo al aprobar solicitud:', e);
+    } finally {
+      setSelectedPlace(null);
+    }
+  };
+
+  const handleReject = async (place: Place) => {
+    try {
+      const { apiRechazarSolicitud } = await import('./services/api');
+      await apiRechazarSolicitud(parseInt(String(place.id), 10));
+      await loadSolicitudes();
+    } catch (e) {
+      console.warn('Fallo al rechazar solicitud:', e);
+    } finally {
+      setSelectedPlace(null);
+    }
   };
 
   return (
@@ -869,6 +1093,16 @@ function AdminDashboard({ user, places, onUpdatePlace, onNavigate, onLogout }: a
         <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
           <h1 className="text-2xl font-bold bg-gradient-to-r from-orange-500 to-purple-600 bg-clip-text text-transparent">Admin Panel</h1>
           <div className="flex gap-3 items-center">
+            <button
+              onClick={() => setShowAgentChat(true)}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-md border border-indigo-300 text-indigo-600 hover:bg-indigo-50 transition"
+              title="Abrir Agente IA"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M7 8h10M7 12h6M5 20h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H9L5 6v12a2 2 0 0 0 2 2Z" />
+              </svg>
+              <span className="text-sm font-medium">Agente IA</span>
+            </button>
             <div className="text-sm text-gray-600">
               <span className="font-medium">{user.name}</span> · <span className="text-purple-600 font-semibold">Administrador</span>
             </div>
@@ -885,22 +1119,50 @@ function AdminDashboard({ user, places, onUpdatePlace, onNavigate, onLogout }: a
       </nav>
 
       <main className="max-w-7xl mx-auto px-6 py-12">
+        {/* Tabs */}
         <div className="mb-8">
-          <h2 className="text-3xl font-bold text-gray-900 mb-2">Gestión de Solicitudes</h2>
-          <p className="text-gray-600">Revisa y modera las solicitudes de lugares enviadas por los usuarios.</p>
+          <div className="flex gap-4 border-b border-gray-200">
+            <button
+              onClick={() => setActiveTab('solicitudes')}
+              className={`px-6 py-3 font-semibold transition-colors border-b-2 ${
+                activeTab === 'solicitudes'
+                  ? 'border-purple-600 text-purple-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Gestión de Solicitudes
+            </button>
+            <button
+              onClick={() => setActiveTab('usuarios')}
+              className={`px-6 py-3 font-semibold transition-colors border-b-2 ${
+                activeTab === 'usuarios'
+                  ? 'border-purple-600 text-purple-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Gestión de Usuarios
+            </button>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
+        {activeTab === 'solicitudes' && (
+          <>
+            <div className="mb-8">
+              <h2 className="text-3xl font-bold text-gray-900 mb-2">Gestión de Solicitudes</h2>
+              <p className="text-gray-600">Revisa y modera las solicitudes de lugares enviadas por los usuarios.</p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
           <div className="bg-white rounded-lg shadow-md p-6 text-center border-l-4 border-yellow-500">
             <div className="text-4xl font-bold text-yellow-600">{pendingPlaces.length}</div>
             <p className="text-gray-600 font-medium">Pendientes de Revisión</p>
           </div>
           <div className="bg-white rounded-lg shadow-md p-6 text-center border-l-4 border-green-500">
-            <div className="text-4xl font-bold text-green-600">{places.filter((p: Place) => p.status === 'approved').length}</div>
+            <div className="text-4xl font-bold text-green-600">{solAcep.length}</div>
             <p className="text-gray-600 font-medium">Aprobadas</p>
           </div>
           <div className="bg-white rounded-lg shadow-md p-6 text-center border-l-4 border-red-500">
-            <div className="text-4xl font-bold text-red-600">{places.filter((p: Place) => p.status === 'rejected').length}</div>
+            <div className="text-4xl font-bold text-red-600">{solRech.length}</div>
             <p className="text-gray-600 font-medium">Rechazadas</p>
           </div>
         </div>
@@ -1094,6 +1356,117 @@ function AdminDashboard({ user, places, onUpdatePlace, onNavigate, onLogout }: a
             </div>
           </div>
         </section>
+          </>
+        )}
+
+        {/* Sección de Usuarios */}
+        {activeTab === 'usuarios' && (
+          <>
+            <div className="mb-8">
+              <h2 className="text-3xl font-bold text-gray-900 mb-2">Gestión de Usuarios</h2>
+              <p className="text-gray-600">Administra todos los usuarios registrados en la plataforma.</p>
+              <button
+                onClick={loadUsers}
+                className="mt-4 inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-gradient-to-r from-purple-600 to-orange-600 text-white font-semibold hover:shadow-lg transition"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
+                  <path d="M21 3v5h-5"/>
+                </svg>
+                Dame los usuarios creados
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
+              <div className="bg-white rounded-lg shadow-md p-6 text-center border-l-4 border-blue-500">
+                <div className="text-4xl font-bold text-blue-600">{allUsers.length}</div>
+                <p className="text-gray-600 font-medium">Total de Usuarios</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-md p-6 text-center border-l-4 border-green-500">
+                <div className="text-4xl font-bold text-green-600">{allUsers.filter(u => u.role === 'user').length}</div>
+                <p className="text-gray-600 font-medium">Usuarios Regulares</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-md p-6 text-center border-l-4 border-purple-500">
+                <div className="text-4xl font-bold text-purple-600">{allUsers.filter(u => u.role === 'moderator' || u.role === 'admin').length}</div>
+                <p className="text-gray-600 font-medium">Moderadores/Admins</p>
+              </div>
+            </div>
+
+            <section>
+              <h3 className="text-xl font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                Lista de Usuarios
+                <span className="text-sm font-normal text-gray-500">({allUsers.length} total)</span>
+              </h3>
+
+              {allUsers.length === 0 ? (
+                <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mx-auto mb-3 text-gray-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <circle cx="12" cy="8" r="4"/>
+                    <path d="M6 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/>
+                  </svg>
+                  <p className="font-medium">No hay usuarios registrados</p>
+                  <p className="text-sm mt-1">Haz clic en "Dame los usuarios creados" para cargar la lista.</p>
+                </div>
+              ) : (
+                <div className="bg-white rounded-lg shadow overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Usuario</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rol</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Estado</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fecha de Creación</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {allUsers.map((u: User) => (
+                          <tr key={u.id} className="hover:bg-gray-50">
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="flex items-center">
+                                <div className="flex-shrink-0 h-10 w-10 rounded-full bg-gradient-to-br from-purple-400 to-orange-400 flex items-center justify-center text-white font-semibold">
+                                  {u.name ? u.name.charAt(0).toUpperCase() : 'U'}
+                                </div>
+                                <div className="ml-4">
+                                  <div className="text-sm font-medium text-gray-900">{u.name || 'Sin nombre'}</div>
+                                  <div className="text-xs text-gray-500">ID: {u.id}</div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="text-sm text-gray-900">{u.email}</div>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
+                                u.role === 'admin' 
+                                  ? 'bg-red-100 text-red-700 border border-red-200' 
+                                  : u.role === 'moderator'
+                                  ? 'bg-orange-100 text-orange-700 border border-orange-200'
+                                  : 'bg-blue-100 text-blue-700 border border-blue-200'
+                              }`}>
+                                {u.role === 'admin' ? 'Administrador' : u.role === 'moderator' ? 'Moderador' : 'Usuario'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-700 border border-yellow-200">
+                                PENDING
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {u.createdAt ? new Date(u.createdAt).toLocaleDateString('es-ES') : 'N/A'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </section>
+          </>
+        )}
       </main>
 
       {/* Modal de detalles */}
@@ -1161,6 +1534,24 @@ function AdminDashboard({ user, places, onUpdatePlace, onNavigate, onLogout }: a
           </div>
         </div>
       )}
+
+      {/* Modal Agente IA */}
+      {showAgentChat && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-black/40" role="dialog" aria-modal="true">
+          <div className="relative w-full max-w-3xl">
+            <div className="absolute -top-3 right-0 flex gap-2">
+              <button
+                onClick={() => setShowAgentChat(false)}
+                className="inline-flex items-center justify-center rounded-full bg-white/90 backdrop-blur px-3 py-1 text-xs font-semibold text-gray-700 shadow border border-gray-200 hover:bg-white"
+                title="Cerrar"
+              >
+                Cerrar ✕
+              </button>
+            </div>
+            <AgentChat />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1183,20 +1574,10 @@ export default function App() {
       }
     }
 
-    // Load places
-    const savedPlaces = localStorage.getItem('places');
-    if (savedPlaces) {
-      try {
-        setPlaces(JSON.parse(savedPlaces));
-      } catch (e) {
-        console.error('Error loading places:', e);
-        setPlaces(MOCK_PLACES);
-        localStorage.setItem('places', JSON.stringify(MOCK_PLACES));
-      }
-    } else {
-      setPlaces(MOCK_PLACES);
-      localStorage.setItem('places', JSON.stringify(MOCK_PLACES));
-    }
+    // NO usar MOCK_PLACES: siempre partir de array vacío para forzar sincronización desde backend
+    // El efecto de sincronización se encargará de cargar los datos reales
+    setPlaces([]);
+    localStorage.removeItem('places'); // Limpiar localStorage para evitar datos obsoletos
 
     // Initialize demo users if they don't exist OR update if admin is missing
     const savedUsers = localStorage.getItem('users');
@@ -1244,9 +1625,71 @@ export default function App() {
     }
   }, []);
 
+  // Sincroniza lugares desde el backend (para admin y usuarios normales)
+  useEffect(() => {
+    if (!currentUser) return;
+    let disposed = false;
+
+    const sync = async () => {
+      try {
+        console.log('🔄 Sincronizando lugares desde backend...', { page: currentPage, role: currentUser.role });
+        const { apiGetPlaces } = await import('./services/api');
+        
+        // Traer lugares desde backend (pending y approved)
+        // NOTA: /rejected no está implementado en el backend todavía, así que por ahora solo traemos pending y approved
+        const [pending, approved] = await Promise.all([
+          apiGetPlaces({ status: 'pending' }).catch(() => []),
+          apiGetPlaces({ status: 'approved' }).catch(() => []),
+        ]);
+        if (disposed) return;
+        
+        const allPlaces = [...pending, ...approved];
+        console.log('✅ Lugares obtenidos:', { pending: pending.length, approved: approved.length, total: allPlaces.length });
+        const normalized = allPlaces.map((p: any) => {
+          const cat = normalizeCategory(p.category) || normalizeCategory(deriveCategoryFromDescription(p.description));
+          const imageUrl = p.photoUrl || p.imageUrl || (p.photos && p.photos[0]) || undefined;
+          console.log(`🖼️ Lugar "${p.name}": photoUrl=${p.photoUrl}, imageUrl final=${imageUrl}`);
+          return {
+            ...p,
+            category: cat || p.category,
+            imageUrl,
+            status: mapStatus(p.status),
+            createdAt: p.createdAt ? new Date(p.createdAt) : new Date(),
+          } as Place;
+        });
+        
+        setPlaces(normalized);
+        localStorage.setItem('places', JSON.stringify(normalized));
+      } catch (e) {
+        console.error('❌ Sincronización de lugares fallida:', e);
+      }
+    };
+
+    // Cargar inmediatamente al entrar
+    sync();
+    
+    // Si es admin, hacer polling cada 10s y al enfocar
+    if (currentUser.role === 'admin' && currentPage === 'admin') {
+      const id = window.setInterval(sync, 10000);
+      const onFocus = () => sync();
+      window.addEventListener('focus', onFocus);
+
+      return () => {
+        disposed = true;
+        window.clearInterval(id);
+        window.removeEventListener('focus', onFocus);
+      };
+    }
+
+    return () => { disposed = true; };
+  }, [currentPage, currentUser]);
+
   const handleLogin = (user: User) => {
     setCurrentUser(user);
     localStorage.setItem('currentUser', JSON.stringify(user));
+    // Limpiar localStorage de lugares para forzar sincronización desde backend
+    localStorage.removeItem('places');
+    setPlaces([]); // Reset estado
     // Redirect based on role
     if (user.role === 'admin') {
       setCurrentPage('admin');
@@ -1305,5 +1748,13 @@ export default function App() {
     }
   };
 
-  return <HomePage user={currentUser} places={places} onNavigate={handleNavigate} onLogout={handleLogout} onAddPlace={handleAddPlace} />;
+  return (
+    <HomePage
+      user={currentUser}
+      places={places}
+      onNavigate={handleNavigate}
+      onLogout={handleLogout}
+      onAddPlace={handleAddPlace}
+    />
+  );
 }
