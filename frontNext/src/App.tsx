@@ -936,6 +936,13 @@ function ModeratorDashboard({ user, places, onUpdatePlace, onNavigate, onLogout 
           <div className="lg:col-span-2">
             {selectedPlace ? (
               <div className="bg-white rounded-lg shadow-md p-8">
+                {selectedPlace.imageUrl && (
+                  <img 
+                    src={selectedPlace.imageUrl} 
+                    alt={selectedPlace.name}
+                    className="w-full h-64 object-cover rounded-lg mb-4"
+                  />
+                )}
                 <h3 className="text-2xl font-bold text-gray-900 mb-4">{selectedPlace.name}</h3>
                 <p className="text-gray-600 mb-4">{selectedPlace.description}</p>
                 <div className="grid grid-cols-2 gap-4 mb-6">
@@ -995,6 +1002,7 @@ function AdminDashboard({ user, places, onUpdatePlace, onNavigate, onLogout }: a
     creatorName: '',
     createdAt: new Date(),
     status: s.estado === 'pendiente' ? 'pending' : s.estado === 'aceptada' ? 'approved' : 'rejected',
+    imageUrl: s.photo_url || undefined,
   });
 
   const loadSolicitudes = async () => {
@@ -1197,23 +1205,23 @@ function AdminDashboard({ user, places, onUpdatePlace, onNavigate, onLogout }: a
                 <div key={place.id} className="bg-white rounded-lg shadow hover:shadow-md transition border border-gray-200 overflow-hidden">
                   <div className="grid md:grid-cols-12 gap-4">
                     {/* Image preview */}
-                    <div className="md:col-span-3">
-                      {place.photos && place.photos.length > 0 ? (
+                    <div className="md:col-span-2">
+                      {place.imageUrl || (place.photos && place.photos.length > 0) ? (
                         <img
-                          src={place.photos[0]}
+                          src={place.imageUrl || (place.photos ? place.photos[0] : '')}
                           alt={place.name}
-                          className="w-full h-48 md:h-full object-cover"
+                          className="w-full h-32 md:h-40 object-cover rounded-l-lg"
                           onError={(e) => { (e.currentTarget as HTMLImageElement).src = 'https://via.placeholder.com/400x300?text=Sin+Imagen'; }}
                         />
                       ) : (
-                        <div className="w-full h-48 md:h-full bg-gray-100 flex items-center justify-center text-gray-400 text-sm">
+                        <div className="w-full h-32 md:h-40 bg-gray-100 flex items-center justify-center text-gray-400 text-sm rounded-l-lg">
                           Sin imagen
                         </div>
                       )}
                     </div>
 
                     {/* Content */}
-                    <div className="md:col-span-6 p-5">
+                    <div className="md:col-span-7 p-5">
                       <div className="flex items-start justify-between mb-3">
                         <div>
                           <h4 className="text-lg font-bold text-gray-900">{place.name}</h4>
