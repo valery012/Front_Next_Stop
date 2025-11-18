@@ -375,18 +375,26 @@ function HomePage({ user, places, onNavigate, onLogout, onAddPlace }: any) {
 
   // Polling de notificaciones
   React.useEffect(() => {
-    if (!user?.email) return;
+    if (!user?.email) {
+      console.log('📧 No hay email de usuario, omitiendo polling de notificaciones');
+      return;
+    }
+    console.log('🔔 Iniciando polling de notificaciones para:', user.email);
     let disposed = false;
 
     const loadNotifications = async () => {
       try {
+        console.log('📥 Cargando notificaciones para:', user.email);
         const { getNotificationsByUser } = await import('./services/notificationsService');
         const notifs = await getNotificationsByUser(user.email);
         if (disposed) return;
+        console.log('✅ Notificaciones recibidas:', notifs);
         setNotifications(notifs);
-        setUnreadCount(notifs.filter((n: any) => n.estado === 'pendiente').length);
+        const unread = notifs.filter((n: any) => n.estado === 'pendiente').length;
+        console.log('🔢 Notificaciones no leídas:', unread);
+        setUnreadCount(unread);
       } catch (error) {
-        console.error('Error cargando notificaciones:', error);
+        console.error('❌ Error cargando notificaciones:', error);
       }
     };
 

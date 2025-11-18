@@ -1,4 +1,4 @@
-import { httpClient } from './httpClient';
+import { httpGet, httpPut, httpDelete } from './httpClient';
 
 const NOTIFICATIONS_BASE_URL = 'http://localhost:5005';
 
@@ -17,8 +17,9 @@ export interface Notification {
  */
 export async function getNotificationsByUser(userEmail: string): Promise<Notification[]> {
 	try {
-		const response = await httpClient.get<Notification[]>(
-			`${NOTIFICATIONS_BASE_URL}/notificaciones/usuario/${encodeURIComponent(userEmail)}`
+		const response = await httpGet<Notification[]>(
+			`${NOTIFICATIONS_BASE_URL}/notificaciones/usuario/${encodeURIComponent(userEmail)}`,
+			{ useAuth: false }
 		);
 		return response;
 	} catch (error) {
@@ -32,7 +33,7 @@ export async function getNotificationsByUser(userEmail: string): Promise<Notific
  */
 export async function markNotificationAsRead(notificationId: number): Promise<void> {
 	try {
-		await httpClient.put(`${NOTIFICATIONS_BASE_URL}/notificaciones/${notificationId}/leer`, {});
+		await httpPut(`${NOTIFICATIONS_BASE_URL}/notificaciones/${notificationId}/leer`, {}, { useAuth: false });
 	} catch (error) {
 		console.error('Error marcando notificación como leída:', error);
 		throw error;
@@ -44,7 +45,7 @@ export async function markNotificationAsRead(notificationId: number): Promise<vo
  */
 export async function deleteNotification(notificationId: number): Promise<void> {
 	try {
-		await httpClient.delete(`${NOTIFICATIONS_BASE_URL}/notificaciones/${notificationId}`);
+		await httpDelete(`${NOTIFICATIONS_BASE_URL}/notificaciones/${notificationId}`, { useAuth: false });
 	} catch (error) {
 		console.error('Error eliminando notificación:', error);
 		throw error;
